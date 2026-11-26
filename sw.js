@@ -1,6 +1,6 @@
 /* Finansialku service worker: simpan tampilan aplikasi agar bisa dibuka tanpa internet.
    Data keuangan tidak disimpan di sini; data selalu lewat Google Apps Script. */
-const VERSION = 'fk-v1';
+const VERSION = 'fk-v2';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png', './icons/maskable-512.png'];
 
 self.addEventListener('install', e => {

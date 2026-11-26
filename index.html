@@ -349,6 +349,7 @@ const S = { tx: [], budgets: [], inv: [], goals: [], set: Object.assign({}, DEFA
 function applyData(d) {
   S.tx = d.transaksi || []; S.budgets = d.anggaran || []; S.inv = d.investasi || []; S.goals = d.target || [];
   S.set = Object.assign({}, DEFAULTS, d.settings || {}); S.sheetUrl = d.sheetUrl || '';
+  S.role = d.role || 'admin'; S.userName = d.userName || '';
   S.tx.forEach(t => { t.jumlah = Number(t.jumlah) || 0; t.tanggal = String(t.tanggal || '').slice(0, 10); });
 }
 const snapshot = () => ({ transaksi: S.tx, anggaran: S.budgets, investasi: S.inv, target: S.goals, settings: S.set, sheetUrl: S.sheetUrl });
@@ -360,7 +361,7 @@ function setSync(s) {
 }
 
 async function load() {
-  if (!connected()) return showSetup();
+  if (!connected() || (INVITE && (CFG() || {}).key !== INVITE.k)) return showSetup();
   document.body.classList.remove('setup');
   if (!S.loaded) { const c = LS.get('fk-cache'); if (c) { applyData(c); S.loaded = true; render(); } }
   if (!navigator.onLine) { setSync('offline'); if (!S.loaded) { S.loaded = true; render(); } return; }
@@ -386,29 +387,44 @@ function persist(fn, ...args) {
 
 /* ================= Layar penghubung (pertama kali) ================= */
 function randomKey() { const a = new Uint8Array(18); crypto.getRandomValues(a); return Array.from(a, b => 'abcdefghijkmnpqrstuvwxyz23456789'[b % 32]).join(''); }
+const b64u = { enc: s => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''), dec: s => decodeURIComponent(escape(atob(s.replace(/-/g, '+').replace(/_/g, '/')))) };
+function readInvite() {
+  const m = location.hash.match(/^#undangan=([\w-]+)/); if (!m) return null;
+  try { const o = JSON.parse(b64u.dec(m[1])); return o && o.u && o.k ? o : null; } catch (e) { return null; }
+}
+const INVITE = readInvite();
+if (INVITE) { try { history.replaceState(null, '', location.pathname); } catch (e) { } }
+
 function showSetup() {
   document.body.classList.add('setup');
-  const c = CFG() || {};
+  const c = CFG() || {}, inv = INVITE;
+  const url = inv ? inv.u : (c.url || ''), key = inv ? inv.k : (c.key || randomKey());
   $('#view').innerHTML = `<div class="panel" style="margin-top:8px">
-    <h2 style="font-size:20px;font-weight:800;letter-spacing:-.02em">Hubungkan ke Google Sheet</h2>
-    <p class="muted" style="margin-top:6px;font-size:14px">Data keuanganmu disimpan di Google Sheet milikmu sendiri lewat Google Apps Script. Langkah ini cukup sekali per HP.</p>
-    <div class="field"><label for="cfg-url">Alamat aplikasi web Apps Script</label><input class="inp" id="cfg-url" inputmode="url" autocomplete="off" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(c.url || '')}"></div>
-    <div class="field"><label for="cfg-key">Kunci rahasia</label><input class="inp" id="cfg-key" autocomplete="off" value="${esc(c.key || randomKey())}"></div>
-    <p class="note">Kunci dibuat otomatis untuk pemakaian pertama dan akan terkunci di Google Sheet-mu. Kalau memasang di HP kedua, ganti dengan kunci yang tertera di Pengaturan HP pertama.</p>
+    ${inv ? `<h2 style="font-size:22px;font-weight:800;letter-spacing:-.02em">Halo${inv.n ? ', ' + esc(inv.n) : ''}</h2>
+      <p class="muted" style="margin-top:6px;font-size:14px">Kamu diundang memakai Finansialku untuk mencatat pemasukan, pengeluaran, anggaran, dan investasimu. Datamu disimpan di Google Sheet terpisah yang dikelola oleh admin yang mengundangmu, dan admin bisa melihatnya.</p>`
+      : `<h2 style="font-size:20px;font-weight:800;letter-spacing:-.02em">Hubungkan ke Google Sheet</h2>
+      <p class="muted" style="margin-top:6px;font-size:14px">Punya link undangan? Buka saja link itu, semuanya terisi otomatis. Kalau kamu pemilik Apps Script, isi alamat /exec di bawah.</p>`}
+    <div ${inv ? 'hidden' : ''}>
+      <div class="field"><label for="cfg-url">Alamat aplikasi web Apps Script</label><input class="inp" id="cfg-url" inputmode="url" autocomplete="off" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(url)}"></div>
+      <div class="field"><label for="cfg-key">Kode akses</label><input class="inp" id="cfg-key" autocomplete="off" value="${esc(key)}"></div>
+      <p class="note">Untuk pemilik: kode yang terisi otomatis ini akan menjadi kunci admin saat pertama terhubung. Di HP kedua, isi dengan kunci dari Pengaturan HP pertama.</p>
+    </div>
     <p class="err" id="cfg-err"></p>
-    <div class="btns"><button class="btn block" id="cfg-go">Hubungkan</button></div>
+    <div class="btns"><button class="btn block" id="cfg-go">${inv ? 'Mulai pakai' : 'Hubungkan'}</button></div>
   </div>`;
   $('#cfg-go').addEventListener('click', async () => {
     const url = $('#cfg-url').value.trim(), key = $('#cfg-key').value.trim(), btn = $('#cfg-go'), err = $('#cfg-err');
     err.textContent = '';
     if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec/.test(url)) return err.textContent = 'Alamat harus berbentuk https://script.google.com/macros/s/…/exec';
-    if (key.length < 12) return err.textContent = 'Kunci minimal 12 karakter.';
-    btn.disabled = true; btn.textContent = 'Menghubungkan…';
+    if (key.length < 12) return err.textContent = 'Kode akses minimal 12 karakter.';
+    const label = btn.textContent; btn.disabled = true; btn.textContent = 'Menghubungkan…';
     try {
       const d = await remote('getAllData', [], { url, key });
+      const prev = CFG(); if (prev && prev.key !== key) { LS.del('fk-outbox'); LS.del('fk-cache'); } // ganti akun di HP ini
       LS.set('fk-config', { url, key }); applyData(d); S.loaded = true; cacheSave();
-      document.body.classList.remove('setup'); setSync('ok'); render(); toast('Terhubung ke Google Sheet');
-    } catch (e) { err.textContent = e.message; btn.disabled = false; btn.textContent = 'Hubungkan'; }
+      document.body.classList.remove('setup'); setSync('ok'); render();
+      toast(S.role === 'user' ? `Selamat datang, ${S.userName}` : 'Terhubung ke Google Sheet');
+    } catch (e) { err.textContent = e.message; btn.disabled = false; btn.textContent = label; }
   });
 }
 
@@ -976,22 +992,30 @@ function goalOpen(id) {
 
 /* ---------- Pengaturan ---------- */
 const LISTS = [['kategoriPengeluaran', 'Kategori pengeluaran'], ['kategoriPemasukan', 'Kategori pemasukan'], ['akun', 'Akun (dompet, bank, e-wallet)'], ['jenisInvestasi', 'Jenis investasi']];
+async function copyText(t, msg) {
+  try { await navigator.clipboard.writeText(t); toast(msg || 'Disalin'); }
+  catch (e) { const ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); toast(msg || 'Disalin'); }
+}
 function settingsSheet() {
+  const admin = S.role !== 'user', pend = outbox.get().length;
   openSheet('Pengaturan', `
-    <div class="banner" style="margin:4px 0 0">Semua data tersimpan di Google Sheet “Finansialku — Data” di Google Drive kamu.${outbox.get().length ? ` Ada ${outbox.get().length} perubahan yang menunggu dikirim.` : ''}</div>
-    ${S.sheetUrl ? '<div class="btns"><button class="btn ghost block" id="s-open">Buka Google Sheet</button></div>' : ''}
-    <div class="field" style="margin-top:20px"><span class="lbl">Kunci rahasia (untuk memasang di HP lain)</span>
+    <div class="banner" style="margin:4px 0 0">${admin
+      ? 'Kamu masuk sebagai admin. Datamu tersimpan di Google Sheet “Finansialku — Data” di Google Drive kamu.'
+      : `Kamu masuk sebagai <strong>${esc(S.userName)}</strong>. Datamu tersimpan di Google Sheet terpisah yang dikelola admin.`}${pend ? ` Ada ${pend} perubahan yang menunggu dikirim.` : ''}</div>
+    ${admin ? `<div class="btns"><button class="btn block" id="s-users">Kelola pengguna</button>${S.sheetUrl ? '<button class="btn ghost block" id="s-open">Buka Google Sheet saya</button>' : ''}</div>` : ''}
+    <div class="field" style="margin-top:20px"><span class="lbl">${admin ? 'Kunci admin (jangan dibagikan, dipakai untuk HP kamu yang lain)' : 'Kode akses kamu (dipakai bila memasang di HP lain)'}</span>
       <div class="addrow" style="margin-top:0"><input class="inp num" id="s-key" readonly value="${esc((CFG() || {}).key || '')}"><button class="btn ghost" id="s-copy">Salin</button></div></div>
     ${LISTS.map(([k, l]) => `<div class="field" style="margin-top:20px"><span class="lbl">${l}</span>
       <div class="chips" data-list="${k}">${S.set[k].map((v, i) => `<button type="button" class="chip rm" data-i="${i}" aria-label="Hapus ${esc(v)}">${esc(v)}<i aria-hidden="true">×</i></button>`).join('')}</div>
       <div class="addrow"><input class="inp" placeholder="Tambah baru" data-add="${k}" aria-label="Tambah ${l}"><button class="btn ghost" data-addbtn="${k}">Tambah</button></div></div>`).join('')}
     <p class="note">Menghapus kategori tidak menghapus transaksi lama yang memakainya.</p>
-    <div class="btns"><button class="btn ghost block" id="s-reload">Muat ulang data</button><button class="btn danger block" id="s-unlink">Putuskan sambungan dari HP ini</button></div>`,
+    <div class="btns"><button class="btn ghost block" id="s-reload">Muat ulang data</button><button class="btn danger block" id="s-unlink">Keluar dari HP ini</button></div>`,
   root => {
     const so = $('#s-open', root); if (so) so.addEventListener('click', () => window.open(S.sheetUrl, '_blank'));
+    const su = $('#s-users', root); if (su) su.addEventListener('click', usersSheet);
     $('#s-reload', root).addEventListener('click', () => { closeSheet(); load(); });
-    $('#s-copy', root).addEventListener('click', () => { const k = $('#s-key', root); k.select(); (navigator.clipboard ? navigator.clipboard.writeText(k.value) : Promise.reject()).then(() => toast('Kunci disalin'), () => { document.execCommand('copy'); toast('Kunci disalin'); }); });
-    $('#s-unlink', root).addEventListener('click', () => { if (outbox.get().length && !confirm('Masih ada perubahan yang belum terkirim. Tetap putuskan?')) return; LS.del('fk-config'); LS.del('fk-cache'); LS.del('fk-outbox'); location.reload(); });
+    $('#s-copy', root).addEventListener('click', () => copyText($('#s-key', root).value, admin ? 'Kunci admin disalin' : 'Kode disalin'));
+    $('#s-unlink', root).addEventListener('click', () => { if (pend && !confirm('Masih ada perubahan yang belum terkirim. Tetap keluar?')) return; LS.del('fk-config'); LS.del('fk-cache'); LS.del('fk-outbox'); location.reload(); });
     const saveList = k => { persist('saveSettings', { [k]: S.set[k] }); render(); settingsSheet(); };
     root.addEventListener('click', e => {
       const rm = e.target.closest('.chip.rm');
@@ -999,6 +1023,87 @@ function settingsSheet() {
       const ab = e.target.closest('[data-addbtn]');
       if (ab) { const k = ab.dataset.addbtn, inp = $(`[data-add="${k}"]`, root), v = inp.value.trim(); if (!v) return; if (S.set[k].includes(v)) return toast('Sudah ada.'); S.set[k] = S.set[k].concat(v); saveList(k); }
     });
+  });
+}
+
+/* ---------- Panel admin: kelola pengguna ---------- */
+const U = { list: null, sum: {} };
+const inviteLink = u => `${location.origin}${location.pathname}#undangan=${b64u.enc(JSON.stringify({ u: CFG().url, k: u.kode, n: u.nama }))}`;
+const inviteText = u => `Halo ${u.nama}, ini aplikasi Finansialku untuk mencatat keuanganmu (pemasukan, pengeluaran, anggaran, investasi).\n\n1. Buka link ini di Chrome HP: ${inviteLink(u)}\n2. Ketuk "Mulai pakai".\n3. Ketuk ⋮ > Instal aplikasi.\n\nCatatan: datamu disimpan di Google Sheet terpisah di Google Drive saya, jadi saya bisa melihatnya. Link ini pribadi, jangan dibagikan ke orang lain.`;
+async function shareInvite(u) {
+  const text = inviteText(u);
+  if (navigator.share) { try { await navigator.share({ title: 'Undangan Finansialku', text }); return; } catch (e) { if (e && e.name === 'AbortError') return; } }
+  copyText(text, 'Pesan undangan disalin. Tempel di WhatsApp.');
+}
+async function loadSummaries(list) {
+  const m = S.month, queue = list.filter(u => u.aktif).slice();
+  const worker = async () => { while (queue.length) { const u = queue.shift(); try { U.sum[u.kode + m] = await api('userSummary', u.kode, m); } catch (e) { U.sum[u.kode + m] = { err: true }; } if ($('#u-list')) $('#u-list').innerHTML = usersListHtml(); } };
+  await Promise.all([worker(), worker(), worker()]);
+}
+function usersListHtml() {
+  const list = U.list || [];
+  if (!list.length) return `<div class="empty" style="padding:20px 8px"><strong>Belum ada pengguna</strong>Tambahkan nama di atas, lalu kirim link undangannya lewat WhatsApp.</div>`;
+  let ti = 0, te = 0;
+  const rows = list.map(u => {
+    const s = U.sum[u.kode + S.month];
+    if (s && !s.err) { ti += s.inc; te += s.exp; }
+    const sub = !u.aktif ? 'Nonaktif' : !s ? 'Menghitung…' : s.err ? 'Ringkasan gagal dimuat' : s.n ? `Masuk ${short(s.inc)}, keluar ${short(s.exp)}` : 'Belum ada catatan bulan ini';
+    return `<button class="row" data-uk="${esc(u.kode)}"><div class="glyph ${u.aktif ? 'in' : ''}">${esc(initial(u.nama))}</div>
+      <div class="grow"><div class="t">${esc(u.nama)}</div><div class="s">${esc(sub)}</div></div>
+      <div class="r"><div class="num" style="font-weight:700">${s && !s.err && u.aktif ? short(s.inc - s.exp) : ''}</div><div class="s">${s && s.last ? 'terakhir ' + dateShort(s.last).replace(/ \d{4}$/, '') : ''}</div></div></button>`;
+  }).join('');
+  return `<div class="panel flush" style="background:var(--paper)">${rows}</div>
+    <div class="kv" style="margin-top:8px"><span>Total semua pengguna ${monShort(S.month)}</span><strong class="num">Masuk ${short(ti)}, keluar ${short(te)}</strong></div>`;
+}
+async function usersSheet() {
+  openSheet('Kelola pengguna', `
+    <p class="muted" style="font-size:13.5px">Setiap pengguna mendapat Google Sheet sendiri di Drive kamu. Mereka hanya bisa melihat data mereka sendiri.</p>
+    <div class="addrow" style="margin-top:12px"><input class="inp" id="u-name" placeholder="Nama pengguna baru" maxlength="40" aria-label="Nama pengguna baru"><button class="btn" id="u-add">Tambah</button></div>
+    <p class="err" id="u-err"></p>
+    <div class="sec-h" style="margin:14px 2px 8px"><h2>Pengguna</h2><span class="muted" style="font-size:13px">${monthLabel(S.month)}</span></div>
+    <div id="u-list"><div class="loading" style="padding:24px"><div class="spinner"></div>Memuat daftar pengguna…</div></div>`,
+  async root => {
+    $('#u-add', root).addEventListener('click', async () => {
+      const inp = $('#u-name', root), nama = inp.value.trim(), btn = $('#u-add', root);
+      if (!nama) return $('#u-err', root).textContent = 'Isi nama dulu.';
+      btn.disabled = true; btn.textContent = 'Membuat…'; $('#u-err', root).textContent = '';
+      try { const u = await api('addUser', nama); U.list = (U.list || []).concat(u); userSheet(u.kode, true); }
+      catch (e) { $('#u-err', root).textContent = e.message; btn.disabled = false; btn.textContent = 'Tambah'; }
+    });
+    root.addEventListener('click', e => { const r = e.target.closest('[data-uk]'); if (r) userSheet(r.dataset.uk); });
+    try { U.list = await api('listUsers'); if ($('#u-list')) { $('#u-list').innerHTML = usersListHtml(); loadSummaries(U.list); } }
+    catch (e) { if ($('#u-list')) $('#u-list').innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  });
+}
+function userSheet(kode, fresh) {
+  const u = (U.list || []).find(x => x.kode === kode); if (!u) return;
+  const s = U.sum[u.kode + S.month];
+  openSheet(u.nama, `
+    ${fresh ? `<div class="banner">Pengguna dibuat. Kirim link undangannya ke ${esc(u.nama)} lewat WhatsApp.</div>` : ''}
+    <div class="kv"><span>Status</span><strong>${u.aktif ? 'Aktif' : 'Nonaktif'}</strong></div>
+    <div class="kv"><span>Dibuat</span><strong>${u.dibuat ? dateShort(u.dibuat) : '-'}</strong></div>
+    ${s && !s.err ? `<div class="kv"><span>Pemasukan ${monShort(S.month)}</span><strong class="num">${rp(s.inc)}</strong></div><div class="kv"><span>Pengeluaran ${monShort(S.month)}</span><strong class="num">${rp(s.exp)}</strong></div>` : ''}
+    <div class="btns">
+      <button class="btn block" id="v-share" ${u.aktif ? '' : 'disabled'}>Kirim link undangan</button>
+      <div class="btn-row"><button class="btn ghost" id="v-link">Salin link</button><button class="btn ghost" id="v-sheet">Buka sheet</button></div>
+    </div>
+    <div class="field" style="margin-top:20px"><label for="v-name">Nama</label><div class="addrow" style="margin-top:0"><input class="inp" id="v-name" value="${esc(u.nama)}" maxlength="40"><button class="btn ghost" id="v-rename">Simpan</button></div></div>
+    <div class="btns">
+      <button class="btn ghost block" id="v-active">${u.aktif ? 'Nonaktifkan pengguna' : 'Aktifkan kembali'}</button>
+      <button class="btn danger block" id="v-reset">Ganti kode akses</button>
+    </div>
+    <p class="note">Nonaktifkan atau ganti kode bila link undangan bocor. Data pengguna tetap tersimpan. Setelah kode diganti, kirim link undangan yang baru.</p>
+    <div class="btns"><button class="btn ghost block" id="v-back">Kembali ke daftar pengguna</button></div>`,
+  root => {
+    const busy = async (btn, fn) => { const t = btn.textContent; btn.disabled = true; btn.textContent = 'Memproses…'; try { await fn(); } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = t; } };
+    const replace = nu => { U.list = U.list.map(x => x.kode === kode ? nu : x); if (U.sum[kode + S.month]) U.sum[nu.kode + S.month] = U.sum[kode + S.month]; };
+    $('#v-share', root).addEventListener('click', () => shareInvite(u));
+    $('#v-link', root).addEventListener('click', () => copyText(inviteLink(u), 'Link undangan disalin'));
+    $('#v-sheet', root).addEventListener('click', () => window.open(u.sheetUrl, '_blank'));
+    $('#v-back', root).addEventListener('click', usersSheet);
+    $('#v-rename', root).addEventListener('click', e => busy(e.target, async () => { const nu = await api('renameUser', kode, $('#v-name', root).value); replace(nu); toast('Nama disimpan'); userSheet(nu.kode); }));
+    $('#v-active', root).addEventListener('click', e => busy(e.target, async () => { const nu = await api('setUserActive', kode, !u.aktif); replace(nu); toast(nu.aktif ? 'Pengguna diaktifkan' : 'Pengguna dinonaktifkan'); userSheet(nu.kode); }));
+    confirmBtn($('#v-reset', root), () => busy($('#v-reset', root), async () => { const nu = await api('resetUserCode', kode); replace(nu); toast('Kode diganti. Kirim link undangan yang baru.'); userSheet(nu.kode); }));
   });
 }
 

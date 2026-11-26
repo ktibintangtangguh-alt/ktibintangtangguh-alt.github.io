@@ -7,6 +7,7 @@ investasi, target tabungan, dan kalkulator investasi.
 - Data disimpan di Google Sheet "Finansialku — Data" di Google Drive pemilik, lewat Google Apps Script
   (`apps-script/Code.gs`). Setiap permintaan dilindungi kunci rahasia.
 - Bisa dipakai tanpa internet: perubahan disimpan di HP lalu dikirim otomatis saat online.
+- Banyak pengguna: admin membuat kode undangan; setiap pengguna mendapat Google Sheet sendiri di Drive admin.
 
 ## Memasang backend
 1. Ganti isi `Kode.gs` di project Apps Script dengan `apps-script/Code.gs` (file Index boleh dihapus).

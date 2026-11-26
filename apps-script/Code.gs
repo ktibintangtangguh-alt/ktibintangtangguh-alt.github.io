@@ -1,6 +1,6 @@
 /**
  * Finansialku — perencana keuangan pribadi
- * Backend Google Apps Script (versi 2: API untuk aplikasi mandiri).
+ * Backend Google Apps Script (versi 3: aplikasi mandiri, banyak pengguna).
  *
  * Semua data disimpan di Google Sheet "Finansialku — Data" di Google Drive kamu.
  * Sheet dibuat otomatis saat aplikasi pertama kali dibuka.
@@ -34,8 +34,12 @@ const DEFAULT_SETTINGS = {
 
 /* ---------- API untuk aplikasi Finansialku (PWA) ---------- */
 // Deploy sebagai Aplikasi web: Jalankan sebagai "Saya", akses "Siapa saja".
-// Semua permintaan wajib membawa kunci rahasia. Kunci pertama yang dipakai
-// aplikasi akan dikunci di sini. Lupa kunci? Jalankan fungsi resetKunci().
+// Versi 3: banyak pengguna. Kunci pertama yang terhubung menjadi kunci ADMIN.
+// Admin membuat kode undangan untuk pengguna lain; setiap pengguna mendapat
+// Google Sheet sendiri di Drive admin. Daftar pengguna ada di tab "Pengguna"
+// pada sheet milik admin. Lupa kunci admin? Jalankan resetKunci().
+
+let CTX = null; // { role: 'admin' | 'user', name, kode, ss }
 
 function doGet() {
   return json_({ ok: true, app: APP_NAME, info: 'API Finansialku aktif. Buka aplikasi Finansialku untuk memakainya.' });
@@ -45,32 +49,142 @@ function doPost(e) {
   try {
     const req = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     const key = String(req.key || '');
-    if (key.length < 12) return json_({ ok: false, auth: true, error: 'Kunci rahasia tidak valid.' });
-    const props = PropertiesService.getScriptProperties();
-    let saved = props.getProperty('API_KEY');
-    if (!saved) {
-      withLock_(function () {
-        saved = props.getProperty('API_KEY');
-        if (!saved) { props.setProperty('API_KEY', key); saved = key; }
-      });
-    }
-    if (key !== saved) return json_({ ok: false, auth: true, error: 'Kunci rahasia salah. Salin kunci dari Pengaturan di HP pertama, atau jalankan fungsi resetKunci di Apps Script.' });
-    const fns = { getAllData: getAllData, saveRecord: saveRecord, saveRecords: saveRecords, deleteRecord: deleteRecord, saveBudgets: saveBudgets, saveSettings: saveSettings };
-    const fn = fns[req.fn];
-    if (!fn) return json_({ ok: false, error: 'Fungsi tidak dikenal: ' + req.fn });
+    if (key.length < 12) return json_({ ok: false, auth: true, error: 'Kode akses tidak valid.' });
+    const ctx = auth_(key);
+    if (!ctx) return json_({ ok: false, auth: true, error: 'Kode akses salah atau sudah dinonaktifkan. Minta kode baru ke admin.' });
+    CTX = ctx;
+    const userFns = { getAllData: getAllData, saveRecord: saveRecord, saveRecords: saveRecords, deleteRecord: deleteRecord, saveBudgets: saveBudgets, saveSettings: saveSettings };
+    const adminFns = { listUsers: listUsers, addUser: addUser, setUserActive: setUserActive, resetUserCode: resetUserCode, renameUser: renameUser, userSummary: userSummary };
+    const fn = userFns[req.fn] || (ctx.role === 'admin' ? adminFns[req.fn] : null);
+    if (!fn) return json_({ ok: false, error: 'Fungsi tidak dikenal atau khusus admin: ' + req.fn });
     return json_({ ok: true, data: fn.apply(null, req.args || []) });
   } catch (err) {
     return json_({ ok: false, error: String((err && err.message) || err) });
   }
 }
 
-/** Jalankan dari editor bila lupa kunci; kunci baru akan dikunci saat aplikasi terhubung lagi. */
+function auth_(key) {
+  const props = PropertiesService.getScriptProperties();
+  let admin = props.getProperty('API_KEY');
+  if (!admin) {
+    withLock_(function () {
+      admin = props.getProperty('API_KEY');
+      if (!admin) { props.setProperty('API_KEY', key); admin = key; }
+    });
+  }
+  if (key === admin) return { role: 'admin', name: 'Admin', kode: '', ss: adminDb_() };
+  const u = findUser_(key);
+  if (!u || !u.aktif) return null;
+  let ss;
+  try { ss = SpreadsheetApp.openById(u.sheetId); } catch (e) { throw new Error('Sheet milik ' + u.nama + ' tidak ditemukan. Minta admin memeriksanya.'); }
+  return { role: 'user', name: u.nama, kode: u.kode, ss: ss };
+}
+
+/** Jalankan dari editor bila lupa kunci admin; perangkat admin berikutnya yang terhubung menjadi admin. */
 function resetKunci() {
   PropertiesService.getScriptProperties().deleteProperty('API_KEY');
 }
 
 function json_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+/* ---------- Pengguna (khusus admin) ---------- */
+
+const USER_COLS = ['kode', 'nama', 'sheetId', 'aktif', 'dibuat'];
+
+function usersSheet_() {
+  const ss = adminDb_();
+  let sh = ss.getSheetByName('Pengguna');
+  if (sh) return sh;
+  sh = ss.insertSheet('Pengguna');
+  sh.getRange(1, 1, 1, USER_COLS.length).setValues([USER_COLS])
+    .setFontWeight('bold').setBackground('#0e6b57').setFontColor('#ffffff');
+  sh.setFrozenRows(1);
+  sh.getRange(2, 1, sh.getMaxRows() - 1, USER_COLS.length).setNumberFormat('@');
+  return sh;
+}
+
+function readUsers_() {
+  const sh = usersSheet_();
+  const last = sh.getLastRow();
+  if (last < 2) return [];
+  return sh.getRange(2, 1, last - 1, USER_COLS.length).getValues()
+    .map(function (r, i) {
+      return { row: i + 2, kode: String(r[0]), nama: String(r[1]), sheetId: String(r[2]), aktif: String(r[3]) !== 'tidak', dibuat: String(r[4]) };
+    })
+    .filter(function (u) { return u.kode; });
+}
+
+function findUser_(kode) {
+  return readUsers_().filter(function (u) { return u.kode === kode; })[0] || null;
+}
+
+function publicUser_(u) {
+  return { kode: u.kode, nama: u.nama, aktif: u.aktif, dibuat: u.dibuat, sheetUrl: 'https://docs.google.com/spreadsheets/d/' + u.sheetId + '/edit' };
+}
+
+function genCode_() {
+  return (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '').slice(0, 16);
+}
+
+function listUsers() {
+  return readUsers_().map(publicUser_);
+}
+
+function addUser(nama) {
+  nama = String(nama || '').trim().slice(0, 40);
+  if (!nama) throw new Error('Isi nama pengguna.');
+  return withLock_(function () {
+    if (readUsers_().some(function (u) { return u.nama.toLowerCase() === nama.toLowerCase(); })) throw new Error('Nama "' + nama + '" sudah dipakai.');
+    const ss = SpreadsheetApp.create(APP_NAME + ' — ' + nama);
+    initSpreadsheet_(ss);
+    const u = { kode: genCode_(), nama: nama, sheetId: ss.getId(), aktif: true, dibuat: Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd') };
+    usersSheet_().appendRow([u.kode, u.nama, u.sheetId, 'ya', u.dibuat]);
+    return publicUser_(u);
+  });
+}
+
+function setUserActive(kode, aktif) {
+  return withLock_(function () {
+    const u = findUser_(kode); if (!u) throw new Error('Pengguna tidak ditemukan.');
+    usersSheet_().getRange(u.row, 4).setValue(aktif ? 'ya' : 'tidak');
+    u.aktif = !!aktif; return publicUser_(u);
+  });
+}
+
+function resetUserCode(kode) {
+  return withLock_(function () {
+    const u = findUser_(kode); if (!u) throw new Error('Pengguna tidak ditemukan.');
+    u.kode = genCode_();
+    usersSheet_().getRange(u.row, 1).setValue(u.kode);
+    return publicUser_(u);
+  });
+}
+
+function renameUser(kode, nama) {
+  nama = String(nama || '').trim().slice(0, 40);
+  if (!nama) throw new Error('Isi nama pengguna.');
+  return withLock_(function () {
+    const u = findUser_(kode); if (!u) throw new Error('Pengguna tidak ditemukan.');
+    usersSheet_().getRange(u.row, 2).setValue(nama);
+    try { SpreadsheetApp.openById(u.sheetId).rename(APP_NAME + ' — ' + nama); } catch (e) { /* sheet tetap */ }
+    u.nama = nama; return publicUser_(u);
+  });
+}
+
+/** Ringkasan satu bulan (yyyy-MM) untuk satu pengguna. */
+function userSummary(kode, month) {
+  const u = findUser_(kode); if (!u) throw new Error('Pengguna tidak ditemukan.');
+  const tx = readTable_(SpreadsheetApp.openById(u.sheetId), 'Transaksi');
+  let inc = 0, exp = 0, n = 0, last = '';
+  tx.forEach(function (t) {
+    if (t.tanggal > last) last = t.tanggal;
+    if (String(t.tanggal).slice(0, 7) !== month) return;
+    n++;
+    if (t.jenis === 'Pemasukan') { if (t.kategori !== 'Saldo Awal') inc += t.jumlah; } else exp += t.jumlah;
+  });
+  return { kode: kode, inc: inc, exp: exp, n: n, last: last };
 }
 
 /* ---------- Fungsi yang dipanggil aplikasi ---------- */
@@ -87,7 +201,9 @@ function getAllData() {
     investasi: readTable_(ss, 'Investasi'),
     target: readTable_(ss, 'Target'),
     settings: settings,
-    sheetUrl: ss.getUrl()
+    sheetUrl: ss.getUrl(),
+    role: CTX ? CTX.role : 'admin',
+    userName: CTX ? CTX.name : 'Admin'
   };
 }
 
@@ -155,6 +271,11 @@ function saveSettings(obj) {
 /* ---------- Penyimpanan ---------- */
 
 function getDb_() {
+  return CTX ? CTX.ss : adminDb_();
+}
+
+/** Sheet milik admin (sheet data pertama). */
+function adminDb_() {
   let ss = null;
   try { ss = SpreadsheetApp.getActiveSpreadsheet(); } catch (e) { ss = null; }
   if (ss) return ss;
@@ -167,13 +288,17 @@ function getDb_() {
   if (!ss) {
     ss = SpreadsheetApp.create(APP_NAME + ' — Data');
     props.setProperty('SHEET_ID', ss.getId());
-    Object.keys(TABLES).forEach(function (name) { getSheet_(ss, name); });
-    // hapus sheet bawaan yang kosong ("Sheet1" / "Lembar1")
-    ss.getSheets().forEach(function (sh) {
-      if (!TABLES[sh.getName()] && sh.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(sh);
-    });
+    initSpreadsheet_(ss);
   }
   return ss;
+}
+
+function initSpreadsheet_(ss) {
+  Object.keys(TABLES).forEach(function (name) { getSheet_(ss, name); });
+  // hapus sheet bawaan yang kosong ("Sheet1" / "Lembar1")
+  ss.getSheets().forEach(function (sh) {
+    if (!TABLES[sh.getName()] && sh.getName() !== 'Pengguna' && sh.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(sh);
+  });
 }
 
 function getSheet_(ss, name) {
